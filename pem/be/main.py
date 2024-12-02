@@ -10,6 +10,9 @@ from functools import lru_cache
 app = FastAPI()
 load_dotenv()
 
+# Get port from environment variable for Render compatibility
+PORT = int(os.getenv("PORT", 8000))
+
 # Configure CORS for Vercel frontend
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +27,11 @@ class ChatMessage(BaseModel):
 
 class GeminiWrapper:
     def __init__(self):
-        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is not set")
+            
+        genai.configure(api_key=api_key)
         self.generation_config = {
             "temperature": 1,
             "top_p": 0.95,
@@ -41,51 +48,78 @@ class GeminiWrapper:
         
         self.processed_files = None
         self.chat_session = None
+        self.file_paths = ["march24.pdf", "nov23.pdf"]
 
     @lru_cache(maxsize=1)
     def upload_and_process_files(self):
         """Upload files once and cache the result"""
-        if self.processed_files is None:
-            files = [
-                self._upload_to_gemini("march24.pdf", "application/pdf"),
-                self._upload_to_gemini("nov23.pdf", "application/pdf")
-            ]
-            self._wait_for_files_active(files)
-            self.processed_files = files
-            # Initialize single chat session
-            self.chat_session = self.model.start_chat(
-                history=[{
-                    "role": "user",
-                    "parts": files,
-                }]
-            )
-        return self.processed_files
+        try:
+            if self.processed_files is None:
+                # Verify files exist before uploading
+                for path in self.file_paths:
+                    if not os.path.exists(path):
+                        raise FileNotFoundError(f"Required file not found: {path}")
+                
+                files = [
+                    self._upload_to_gemini(path, "application/pdf")
+                    for path in self.file_paths
+                ]
+                self._wait_for_files_active(files)
+                self.processed_files = files
+                
+                # Initialize single chat session
+                self.chat_session = self.model.start_chat(
+                    history=[{
+                        "role": "user",
+                        "parts": files,
+                    }]
+                )
+            return self.processed_files
+        except Exception as e:
+            print(f"Error in upload_and_process_files: {str(e)}")
+            raise
 
     def _upload_to_gemini(self, path, mime_type=None):
         """Upload a single file to Gemini"""
-        file = genai.upload_file(path, mime_type=mime_type)
-        print(f"Uploaded file '{file.display_name}' as: {file.uri}")
-        return file
+        try:
+            file = genai.upload_file(path, mime_type=mime_type)
+            print(f"Uploaded file '{file.display_name}' as: {file.uri}")
+            return file
+        except Exception as e:
+            print(f"Error uploading file {path}: {str(e)}")
+            raise
 
     def _wait_for_files_active(self, files):
         """Wait for files to be processed"""
         print("Waiting for file processing...")
+        max_retries = 30  # 5 minutes maximum wait
+        retry_count = 0
+        
         for name in (file.name for file in files):
             file = genai.get_file(name)
-            while file.state.name == "PROCESSING":
+            while file.state.name == "PROCESSING" and retry_count < max_retries:
                 print(".", end="", flush=True)
                 time.sleep(10)
                 file = genai.get_file(name)
+                retry_count += 1
+                
             if file.state.name != "ACTIVE":
-                raise Exception(f"File {file.name} failed to process")
+                raise Exception(f"File {file.name} failed to process. Current state: {file.state.name}")
         print("...all files ready")
         print()
 
     def get_response(self, message: str):
         """Get response from the chat session"""
-        if self.chat_session is None:
-            self.upload_and_process_files()
-        return self.chat_session.send_message(message)
+        try:
+            if self.chat_session is None:
+                self.upload_and_process_files()
+            return self.chat_session.send_message(message)
+        except Exception as e:
+            print(f"Error getting response: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing message: {str(e)}"
+            )
 
 # Initialize wrapper
 gemini_wrapper = GeminiWrapper()
@@ -93,16 +127,30 @@ gemini_wrapper = GeminiWrapper()
 @app.on_event("startup")
 async def startup_event():
     """Process files when server starts"""
-    gemini_wrapper.upload_and_process_files()
+    try:
+        print("Starting file processing...")
+        gemini_wrapper.upload_and_process_files()
+        print("File processing completed successfully")
+    except Exception as e:
+        print(f"Error during startup: {str(e)}")
+        # Don't raise here, let the application start even if file processing fails
+        # Individual requests will fail if needed
 
 @app.post("/chat")
 async def chat(message: ChatMessage):
     try:
         response = gemini_wrapper.get_response(message.message)
         return {"response": response.text}
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy"}
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
