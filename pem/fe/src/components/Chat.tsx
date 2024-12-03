@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { Send } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 
 const Chat = () => {
   const [messages, setMessages] = useState<Array<{ role: string; content: string }>>([]);
@@ -61,7 +62,25 @@ const Chat = () => {
                   : 'bg-white text-gray-800'
               }`}
             >
-              {message.content}
+              <ReactMarkdown
+                components={{
+                  // Style paragraphs to preserve whitespace and line breaks
+                  p: ({ children }) => <p className="whitespace-pre-wrap mb-4 last:mb-0">{children}</p>,
+                  // Style code blocks
+                  code: ({ children }) => (
+                    <code className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded">{children}</code>
+                  ),
+                  // Style headers
+                  h1: ({ children }) => <h1 className="text-2xl font-bold mb-4">{children}</h1>,
+                  h2: ({ children }) => <h2 className="text-xl font-bold mb-3">{children}</h2>,
+                  h3: ({ children }) => <h3 className="text-lg font-bold mb-2">{children}</h3>,
+                  // Style lists
+                  ul: ({ children }) => <ul className="list-disc ml-6 mb-4">{children}</ul>,
+                  ol: ({ children }) => <ol className="list-decimal ml-6 mb-4">{children}</ol>,
+                }}
+              >
+                {message.content}
+              </ReactMarkdown>
             </div>
           </div>
         ))}
