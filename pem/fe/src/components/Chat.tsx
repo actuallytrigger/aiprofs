@@ -94,6 +94,9 @@ const Chat = () => {
           </button>
         </div>
       </form>
+      <div className="text-center text-xs text-gray-500 py-2">
+        made with ❤️ by akshay
+      </div>
     </div>
   );
 };
