@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from functools import lru_cache
 from contextlib import asynccontextmanager
 import uuid  # Import for generating UUIDs
+import asyncio
+from datetime import datetime
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -16,6 +18,8 @@ async def lifespan(app: FastAPI):
         print("Starting file processing...")
         gemini_wrapper.upload_and_process_files()
         print("File processing completed successfully")
+        # Start the cleanup task
+        asyncio.create_task(gemini_wrapper.cleanup_old_sessions())
     except Exception as e:
         print(f"Error during startup: {str(e)}")
     yield
@@ -63,10 +67,31 @@ class GeminiWrapper:
         
         self.processed_files = None
         self.chat_sessions = {}  # Store chat sessions by session ID
+        self.last_used = {}  # Store last used timestamp for each session
         self.file_paths = [
             os.path.join(script_dir, "march24.pdf"),
             os.path.join(script_dir, "nov23.pdf")
         ]
+
+    async def cleanup_old_sessions(self):
+        """Cleanup task that runs every 15 minutes to remove inactive sessions"""
+        while True:
+            current_time = datetime.now().timestamp()
+            # Find sessions older than 15 minutes
+            expired_sessions = [
+                session_id for session_id, last_used in self.last_used.items()
+                if current_time - last_used > 900  # 15 minutes in seconds
+            ]
+            
+            # Remove expired sessions
+            for session_id in expired_sessions:
+                if session_id in self.chat_sessions:
+                    del self.chat_sessions[session_id]
+                if session_id in self.last_used:
+                    del self.last_used[session_id]
+            
+            # Wait for 15 minutes before next cleanup
+            await asyncio.sleep(900)
 
     @lru_cache(maxsize=1)
     def upload_and_process_files(self):
@@ -130,23 +155,25 @@ class GeminiWrapper:
         return session_id
         
     def get_chat_session(self, session_id: str):
-      """Get or create a chat session for the given session ID."""
-      if session_id not in self.chat_sessions:
-          if self.processed_files is None:
-            self.upload_and_process_files()
-          self.chat_sessions[session_id] = self.model.start_chat(
-              history=[{
-                  "role": "user",
-                  "parts": self.processed_files,
-              }]
-          )
-      return self.chat_sessions[session_id]
+        """Get or create a chat session for the given session ID."""
+        if session_id not in self.chat_sessions:
+            if self.processed_files is None:
+                self.upload_and_process_files()
+            self.chat_sessions[session_id] = self.model.start_chat(
+                history=[{
+                    "role": "user",
+                    "parts": self.processed_files,
+                }]
+            )
+        # Update last used timestamp
+        self.last_used[session_id] = datetime.now().timestamp()
+        return self.chat_sessions[session_id]
 
     def get_response(self, message: str, session_id:str):
         """Get response from the chat session"""
         try:
-          chat_session = self.get_chat_session(session_id)
-          return chat_session.send_message(message)
+            chat_session = self.get_chat_session(session_id)
+            return chat_session.send_message(message)
         except Exception as e:
             print(f"Error getting response: {str(e)}")
             raise HTTPException(
