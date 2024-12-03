@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -7,6 +7,7 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from functools import lru_cache
 from contextlib import asynccontextmanager
+import uuid  # Import for generating UUIDs
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -61,7 +62,7 @@ class GeminiWrapper:
         )
         
         self.processed_files = None
-        self.chat_session = None
+        self.chat_sessions = {}  # Store chat sessions by session ID
         self.file_paths = [
             os.path.join(script_dir, "march24.pdf"),
             os.path.join(script_dir, "nov23.pdf")
@@ -83,14 +84,6 @@ class GeminiWrapper:
                 ]
                 self._wait_for_files_active(files)
                 self.processed_files = files
-                
-                # Initialize single chat session
-                self.chat_session = self.model.start_chat(
-                    history=[{
-                        "role": "user",
-                        "parts": files,
-                    }]
-                )
             return self.processed_files
         except Exception as e:
             print(f"Error in upload_and_process_files: {str(e)}")
@@ -125,12 +118,35 @@ class GeminiWrapper:
         print("...all files ready")
         print()
 
-    def get_response(self, message: str):
+    def get_session_id(self, request: Request):
+        """Get or create a session ID for the user."""
+        # Option 1: Use IP Address (simple but not perfect for users behind the same NAT)
+        # session_id = request.client.host  
+        
+        # Option 2: Use a randomly generated UUID (better for most cases)
+        session_id = request.headers.get("X-Session-Id")
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        return session_id
+        
+    def get_chat_session(self, session_id: str):
+      """Get or create a chat session for the given session ID."""
+      if session_id not in self.chat_sessions:
+          if self.processed_files is None:
+            self.upload_and_process_files()
+          self.chat_sessions[session_id] = self.model.start_chat(
+              history=[{
+                  "role": "user",
+                  "parts": self.processed_files,
+              }]
+          )
+      return self.chat_sessions[session_id]
+
+    def get_response(self, message: str, session_id:str):
         """Get response from the chat session"""
         try:
-            if self.chat_session is None:
-                self.upload_and_process_files()
-            return self.chat_session.send_message(message)
+          chat_session = self.get_chat_session(session_id)
+          return chat_session.send_message(message)
         except Exception as e:
             print(f"Error getting response: {str(e)}")
             raise HTTPException(
@@ -142,10 +158,11 @@ class GeminiWrapper:
 gemini_wrapper = GeminiWrapper()
 
 @app.post("/chat")
-async def chat(message: ChatMessage):
+async def chat(message: ChatMessage, request: Request):
     try:
-        response = gemini_wrapper.get_response(message.message)
-        return {"response": response.text}
+        session_id = gemini_wrapper.get_session_id(request)
+        response = gemini_wrapper.get_response(message.message, session_id)
+        return {"response": response.text, "X-Session-Id": session_id}
     except HTTPException as e:
         raise e
     except Exception as e:
