@@ -6,8 +6,21 @@ import time
 import google.generativeai as genai
 from dotenv import load_dotenv
 from functools import lru_cache
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    try:
+        print("Starting file processing...")
+        gemini_wrapper.upload_and_process_files()
+        print("File processing completed successfully")
+    except Exception as e:
+        print(f"Error during startup: {str(e)}")
+    yield
+    # Shutdown (if needed)
+
+app = FastAPI(lifespan=lifespan)
 load_dotenv()
 
 # Get port from environment variable for Render compatibility
@@ -28,6 +41,7 @@ class ChatMessage(BaseModel):
 class GeminiWrapper:
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
         if not api_key:
             raise ValueError("GEMINI_API_KEY environment variable is not set")
             
@@ -48,7 +62,10 @@ class GeminiWrapper:
         
         self.processed_files = None
         self.chat_session = None
-        self.file_paths = ["march24.pdf", "nov23.pdf"]
+        self.file_paths = [
+            os.path.join(script_dir, "march24.pdf"),
+            os.path.join(script_dir, "nov23.pdf")
+        ]
 
     @lru_cache(maxsize=1)
     def upload_and_process_files(self):
@@ -123,18 +140,6 @@ class GeminiWrapper:
 
 # Initialize wrapper
 gemini_wrapper = GeminiWrapper()
-
-@app.on_event("startup")
-async def startup_event():
-    """Process files when server starts"""
-    try:
-        print("Starting file processing...")
-        gemini_wrapper.upload_and_process_files()
-        print("File processing completed successfully")
-    except Exception as e:
-        print(f"Error during startup: {str(e)}")
-        # Don't raise here, let the application start even if file processing fails
-        # Individual requests will fail if needed
 
 @app.post("/chat")
 async def chat(message: ChatMessage):
